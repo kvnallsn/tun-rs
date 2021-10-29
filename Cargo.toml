@@ -1,0 +1,47 @@
+[package]
+name = "tun-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+keywords = ["tun", "vpn", "net"]
+categories = ["network-programming", "os"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["channel"]
+channel = ["crossbeam-channel"]
+
+# enable this to build tests that must run as root
+root-tests = []
+
+[[example]]
+name = "echo"
+path = "examples/echo.rs"
+
+[[example]]
+name = "echo_udp"
+path = "examples/echo_udp.rs"
+
+[[example]]
+name = "open"
+path = "examples/open.rs"
+
+[[example]]
+name = "tcplog"
+path = "examples/tcplog.rs"
+
+[dependencies]
+crossbeam-channel = { version = "0.5", optional = true }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+ctrlc = "3"
+pnet = "0.28"
+rand = "0.8"
+tracing-subscriber = "0.2"
+
+[target.'cfg(target_os="linux")'.dependencies]
+libc = "0.2"
+neli = "0.5"
