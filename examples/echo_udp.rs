@@ -47,7 +47,7 @@ fn main() {
     ctrlc::set_handler(move || tx.send(()).expect("failed to send ctrlc message"))
         .expect("failed to set ctrlc handler");
 
-    let mut tun = OsTun::create("dune0", TunConfig::default().ip([192, 168, 70, 100], 24))
+    let mut tun = OsTun::create(TunConfig::default().ip([192, 168, 70, 100], 24))
         .expect("failed to build tun device");
 
     tun.up().expect("failed to set tun as up");

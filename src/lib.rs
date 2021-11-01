@@ -10,12 +10,20 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use self::linux::OsTun;
 
+#[cfg(target_os = "freebsd")]
+mod freebsd;
+#[cfg(target_os = "freebsd")]
+pub use self::freebsd::OsTun;
+
 #[cfg(feature = "channel")]
 mod channel;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TunError {
-    #[error("device name has nul bytes at position {pos}")]
+    #[error("string must have exactly one null byte at the end. No more, no less")]
+    InvalidCString,
+
+    #[error("device name has null bytes at position {pos}")]
     DeviceNameContainsNuls { pos: usize },
 
     #[error("device name too long. got len: {len}, max len: {max}")]
@@ -32,6 +40,9 @@ pub enum TunError {
 
     #[error("failed to find device")]
     DeviceNotFound,
+
+    #[error("cidr must be between 0 and 32, got {cidr}")]
+    Ipv4InvalidCidr { cidr: u8 },
 
     #[error("{0}")]
     IO(#[from] io::Error),
