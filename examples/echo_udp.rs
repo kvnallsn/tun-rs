@@ -6,7 +6,7 @@ use pnet::packet::{
 };
 use std::{
     io::{Read, Write},
-    thread,
+    sync::{Arc, atomic::{Ordering, AtomicBool}},
 };
 use tun_rs::{OsTun, Tun, TunConfig};
 
@@ -43,16 +43,21 @@ fn handle_packet(ip: &Ipv4Packet, udp: &UdpPacket) -> MutableIpv4Packet<'static>
 fn main() {
     init_tracing();
 
-    let (tx, rx) = crossbeam_channel::bounded(0);
-    ctrlc::set_handler(move || tx.send(()).expect("failed to send ctrlc message"))
-        .expect("failed to set ctrlc handler");
+    let stop = Arc::new(AtomicBool::new(false));
+    ctrlc::set_handler({
+        let stop = stop.clone();
+        move || stop.store(true, Ordering::Relaxed)
+    })
+    .expect("failed to set ctrl-c handler");
 
     let mut tun = OsTun::create(TunConfig::default().ip([192, 168, 70, 100], 24))
         .expect("failed to build tun device");
 
     tun.up().expect("failed to set tun as up");
 
-    thread::spawn(move || loop {
+    println!("waiting for ctrl-c event...");
+
+    while !stop.load(Ordering::Relaxed) {
         let mut buf = [0u8; 1500];
         tun.read(&mut buf).expect("failed to read from device");
         let ip_version = buf[0] >> 4;
@@ -73,9 +78,7 @@ fn main() {
             }
             _ => { /* ignore non-ipv4 packets */ }
         }
-    });
+    }
 
-    println!("waiting for ctrl-c event...");
-    rx.recv().expect("failed to wait for ctrl-c event");
     println!("caught ctrl-c, qutting");
 }
