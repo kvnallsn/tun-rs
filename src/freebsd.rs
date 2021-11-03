@@ -12,8 +12,12 @@ use std::{
 
 const TUN_DEVICE_PATH: &[u8; 9] = b"/dev/tun\0";
 
-// IOCTLs (see sys/sockio.h)
-const SIOCAIFADDR: u64 = 0x8044_692b;
+// IOCTLs (source file listed after IOCTL number)
+const SIOCAIFADDR: u64 = 0x8044_692b; // sys/sockio.h
+const SIOCSIFFLAGS: u64 = 0x8020_6910; // sys/sockio.h
+const SIOCGIFFLAGS: u64 = 0xc020_6911; // sys/sockio.h
+const SIOCIFDESTROY: u64 = 0x8020_6979; // sys/sockio.h
+const TUNSIFMODE: u64 = 0x8004_745e; // net/if_tun.h
 
 /// A generic layer-3 tunnel using the OS's networking primitives
 #[derive(Debug)]
@@ -21,14 +25,54 @@ pub struct OsTun {
     // opened file descriptor used to read/write to this device
     fd: RawFd,
 
+    // opened socket descriptor used in socket ioctls
+    sock_fd: RawFd,
+
     // null-terminated device name string
     name: [u8; libc::IFNAMSIZ],
 }
 
+/// IOCTL type to set an interface's address
+#[repr(C)]
+#[derive(Debug)]
+struct IfAliasReq {
+    /// Name of interface (e.g., `tun0`)
+    ifra_name: [u8; libc::IFNAMSIZ],
+
+    /// IPv4 Address to set
+    ifra_addr: libc::sockaddr_in,
+
+    /// Broadcast address of CIDR (Broadcast mode)
+    /// Destination address (Point-to-Point mode)
+    ifra_broadaddr: libc::sockaddr_in,
+
+    /// Subnet mask
+    ifra_mask: libc::sockaddr_in,
+
+    /// ?? CARP Related
+    ifra_vhid: i32, 
+}
+
+#[repr(C)]
+struct IfFlagsReq {
+    /// Name of interface (e.g., `tun0`)
+    ifr_name: [u8; libc::IFNAMSIZ],
+
+    /// Flags set on this interface
+    ifru_flags: i32,
+
+    /// additional data (union)
+    #[allow(dead_code)]
+    pad: [u8; 12],
+}
+
+
 impl Read for OsTun {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: buf is guarenteed to be a valid u8 pointer and we don't exceed it's length
         let n: isize = unsafe { libc::read(self.fd, buf.as_mut_ptr() as _, buf.len()) };
         tracing::trace!("tun read: read {} bytes", n);
+
         match n {
             -1 => Err(io::Error::last_os_error()),
             n => Ok(n as usize),
@@ -39,6 +83,9 @@ impl Read for OsTun {
 impl Write for OsTun {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         tracing::trace!("tun write: writing {} bytes", buf.len());
+
+        // SAFETY: self.fd is guarenteed to be a valid/opened file descripter
+        //         buf is guarenteed to be a valid u8 pointer with a set length 
         match unsafe { libc::write(self.fd, buf.as_ptr() as _, buf.len() as _) } {
             -1 => Err(io::Error::last_os_error()),
             n => Ok(n as usize),
@@ -60,18 +107,27 @@ impl OsTun {
     /// # Arguments
     /// * `cfg` - tun configuration options
     pub fn create(cfg: TunConfig) -> Result<Self, TunError> {
-        // create a new tun device by opening the special device `/dev/tun`
+        // 1. create a new tun device by opening the special device `/dev/tun`
         let tun_dev_path = CStr::from_bytes_with_nul(TUN_DEVICE_PATH.as_ref())
             .map_err(|_| TunError::InvalidCString)?;
 
         // SAFETY: tun_dev_path is validated above as a CStr, ensuring it
         // has exactly one null byte at the end of the string
-        let fd = unsafe { libc::open(tun_dev_path.as_ptr(), libc::O_RDONLY) };
+        let fd = unsafe { libc::open(tun_dev_path.as_ptr(), libc::O_RDWR) };
         if fd == -1 {
             return Err(TunError::IO(io::Error::last_os_error()));
         }
 
-        // get the device name
+        // 2. set the device to broadcast mode (vs. point to point) w/ multicast
+        let flags: i32 = libc::IFF_BROADCAST | libc::IFF_MULTICAST;
+
+        // SAFETY: ioctl has been verified using truss to be correct
+        if unsafe { libc::ioctl(fd, TUNSIFMODE, &flags as *const i32) } == -1 {
+            tracing::error!("failed to set interface to broadcast mode");
+            return Err(TunError::Generic(Box::new(nix::errno::Errno::last())));
+        }
+
+        // 3. get the device name
         // fdevname() seems to be missing from the libc crate so we'll go the
         // fstat route with devname_r()
 
@@ -102,16 +158,20 @@ impl OsTun {
             return Err(TunError::IO(io::Error::last_os_error()));
         }
 
-        /*
-        // consume chars until the first null byte then make it a cstring
-        let name: Vec<u8> = name.into_iter().take_while(|&ch| ch != 0).collect();
-        let name = CString::new(name).map_err(|e| TunError::DeviceNameContainsNuls {
-            pos: e.nul_position(),
-        })?;
-        */
+        // 4. create socket file descriptor used to configure interface
+        //(via socket ioctls)
+        // SAFETY: socket call uses standard parameters and return value is checked
+        let sock_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock_fd == -1 {
+            return Err(TunError::DeviceNotFound);
+        }
 
-        let mut tun = Self { fd, name };
+        // 4. create OsTun instance
+        let mut tun = Self { fd, sock_fd, name };
+
+        // 5. configure device
         tun.configure(cfg)?;
+
         Ok(tun)
     }
 
@@ -119,23 +179,12 @@ impl OsTun {
     ///
     /// # Arguments
     /// * `cfg` - Tunnel Configuration Options
+    ///
+    /// # Errors
+    /// * UDP config socket fails to open
+    /// * An invalid CIDR is passed with the IP
+    /// * Fails to set the IP address
     pub fn configure(&mut self, cfg: TunConfig) -> Result<(), TunError> {
-        #[repr(C)]
-        #[derive(Debug)]
-        struct IfAliasReq {
-            ifra_name: [u8; libc::IFNAMSIZ],
-            ifra_addr: libc::sockaddr_in,
-            ifra_broadaddr: libc::sockaddr_in,
-            ifra_mask: libc::sockaddr_in,
-            ifra_vhid: i32, // ?? CARP related?
-        }
-
-        // SAFETY: socket call uses standard parameters and return value is checked
-        let sfd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-        if sfd == -1 {
-            return Err(TunError::DeviceNotFound);
-        }
-
         if let Some((ip, mask)) = cfg.ip {
             // ioctl SIOCAIFADDR
             match ip {
@@ -183,7 +232,7 @@ impl OsTun {
                     tracing::trace!("ifreqalias: {:?}", req);
 
                     // SAFETY: ioctl has been verified using truss to be correct
-                    let res = unsafe { libc::ioctl(sfd, SIOCAIFADDR, &req as *const IfAliasReq) };
+                    let res = unsafe { libc::ioctl(self.sock_fd, SIOCAIFADDR, &req as *const IfAliasReq) };
                     if res == -1 {
                         tracing::error!("errno: {}", nix::errno::Errno::last());
                     }
@@ -195,28 +244,106 @@ impl OsTun {
             }
         }
 
-        // SAFTEY: sfd is guarenteed to be a valid socket descriptor
-        unsafe {
-            libc::close(sfd);
+        Ok(())
+    }
+
+
+    /// Retrieves the interface's flags
+    fn get_ifflags(&self) -> Result<IfFlagsReq, TunError> {
+        let mut req = IfFlagsReq {
+            ifr_name: self.name.clone(),
+            ifru_flags: 0,
+            pad: [0; 12],
+        };
+
+        // SAFETY: ioctl has been verified using truss to be correct
+        if unsafe { libc::ioctl(self.sock_fd, SIOCGIFFLAGS, &mut req as *mut _) } == -1 {
+            return Err(TunError::Generic(Box::new(nix::errno::Errno::last())));
+        }
+
+        Ok(req)
+    }
+}
+
+impl Tun for OsTun {
+    fn up(&self) -> Result<(), TunError> {
+        let mut req = self.get_ifflags()?;
+        tracing::debug!("got flags: {:x}", req.ifru_flags);
+        req.ifru_flags |= libc::IFF_UP;
+        tracing::debug!("set flags: {:x}", req.ifru_flags);
+
+        // SAFETY: ioctl has been verified using truss to be correct
+        if unsafe { libc::ioctl(self.sock_fd, SIOCSIFFLAGS, &req as *const _) } == -1 {
+            return Err(TunError::Generic(Box::new(nix::errno::Errno::last())));
+        }
+
+        Ok(())
+    }
+
+    fn down(&self) -> Result<(), TunError> {
+        let mut req = self.get_ifflags()?;
+        req.ifru_flags &= !libc::IFF_UP;
+
+        // SAFETY: ioctl has been verified using truss to be correct
+        if unsafe { libc::ioctl(self.sock_fd, SIOCSIFFLAGS, &req as *const _) } == -1 {
+            return Err(TunError::Generic(Box::new(nix::errno::Errno::last())));
         }
 
         Ok(())
     }
 }
 
-impl Tun for OsTun {
-    fn up(&self) -> Result<(), TunError> {
-        Ok(())
-    }
+impl Drop for OsTun {
+    fn drop(&mut self) {
+        tracing::debug!("dropping interface");
 
-    fn down(&self) -> Result<(), TunError> {
-        Ok(())
+        // 1. close interface file descripter
+        // SAFETY: self.fd is guarenteed to be a valid file descriptor
+        if unsafe { libc::close(self.fd) } == -1 {
+            tracing::error!("failed to close device fd");
+        }
+
+        // 2. delete the interface
+        let req = IfFlagsReq {
+            ifr_name: self.name.clone(),
+            ifru_flags: 0,
+            pad: [0; 12],
+        };
+
+        if unsafe { libc::ioctl(self.sock_fd, SIOCIFDESTROY, &req as *const _) } == -1 {
+            tracing::error!("failed to delete interface");
+        }
+        
+        // SAFTEY: sfd is guarenteed to be a valid socket descriptor
+        if unsafe { libc::close(self.sock_fd) } == -1 {
+            tracing::error!("failed to close sock fd"); 
+        }
     }
 }
 
-impl Drop for OsTun {
-    fn drop(&mut self) {
-        // SAFETY: self.fd is guarenteed to be a valid file descriptor
-        unsafe { libc::close(self.fd) };
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg_attr(not(feature = "root-tests"), ignore)]
+    fn create_device() -> Result<(), TunError> {
+        // 1. Create a device with the ip 192.168.70.100/24
+        let cfg = TunConfig::default().ip([192, 168, 70, 100], 24);
+        let tun = OsTun::create(cfg)?;
+
+        // set tun up
+        tun.up()?;
+
+        // set tun down
+        tun.down()?;
+
+        // set tun up
+        tun.up()?;
+
+        // drop tun to delete interface
+        drop(tun);
+
+        Ok(())
     }
 }
