@@ -27,7 +27,7 @@ fn main() {
         .expect("failed to set ctrlc handler");
 
     // create a tun device and assign it an ip (in this case `192.168.70.100/24`)
-    let mut tun = OsTun::create("dune0", TunConfig::default().ip([192, 168, 70, 100], 24))
+    let mut tun = OsTun::create(TunConfig::default().ip([192, 168, 70, 100], 24))
         .expect("failed to build tun device");
 
     // mark the tun device as `up`
