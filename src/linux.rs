@@ -52,6 +52,27 @@ pub struct OsTun {
     index: i32,
 }
 
+/// Platform-specific tunnel configuration parameters
+#[derive(Debug, Default)]
+pub struct OsTunConfig {
+    pub(crate) packet_info: bool,
+}
+
+pub trait OsConfig {
+    /// Enable packet information on this TUN device
+    ///
+    /// # Arguments
+    /// * `enabled` - true to enable packet information, false to disable
+    fn packet_information(self, enabled: bool) -> Self;
+}
+
+impl OsConfig for TunConfig {
+    fn packet_information(mut self, enabled: bool) -> Self {
+        self.os.packet_info = enabled;
+        self
+    }
+}
+
 impl Read for OsTun {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n: isize = unsafe { libc::read(self.fd, buf.as_mut_ptr() as _, buf.len()) };
@@ -217,6 +238,10 @@ impl OsTun {
     pub fn configure(&mut self, cfg: TunConfig) -> Result<(), TunError> {
         if let Some((ip, mask)) = cfg.ip {
             self.assign_ip(ip, mask)?;
+        }
+
+        if cfg.os.packet_info {
+            // enable packet information
         }
 
         Ok(())

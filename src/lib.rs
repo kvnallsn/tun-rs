@@ -8,7 +8,7 @@ use std::{
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use self::linux::OsTun;
+pub use self::linux::{OsTun, OsTunConfig};
 
 #[cfg(feature = "channel")]
 mod channel;
@@ -50,7 +50,10 @@ pub trait Tun: Read + Write + Sized {
 #[derive(Default)]
 pub struct TunConfig {
     /// IP address and subnet mask to assign TUN device
-    pub ip: Option<(IpAddr, u8)>,
+    pub(crate) ip: Option<(IpAddr, u8)>,
+
+    /// OS-specific configuration parameters
+    pub(crate) os: OsTunConfig,
 }
 
 impl TunConfig {
