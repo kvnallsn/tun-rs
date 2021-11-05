@@ -6,7 +6,10 @@ use pnet::packet::{
 };
 use std::{
     io::{Read, Write},
-    sync::{Arc, atomic::{Ordering, AtomicBool}},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tun_rs::{OsTun, Tun, TunConfig};
 

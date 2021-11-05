@@ -44,6 +44,12 @@ pub enum TunError {
     #[error("cidr must be between 0 and 32, got {cidr}")]
     Ipv4InvalidCidr { cidr: u8 },
 
+    #[error("buffer too small")]
+    BufferTooSmall,
+
+    #[error("read didn't produce enough data")]
+    NotEnoughData,
+
     #[error("{0}")]
     IO(#[from] io::Error),
 
@@ -52,9 +58,38 @@ pub enum TunError {
 }
 
 pub trait Tun: Read + Write + Sized {
+    /// Marks the device as up on the system
     fn up(&self) -> Result<(), TunError>;
 
+    /// Marks the device as down on the system
     fn down(&self) -> Result<(), TunError>;
+
+    /// Reads a packet from this tun device, including potentially packet information
+    ///
+    /// The buffer must be at least 5 bytes or an error is returned
+    ///
+    /// # Arguments
+    /// * `buf` - buffer to read data into
+    ///
+    /// # Errors
+    /// * I/O
+    fn read_packet<'a>(&self, buf: &'a mut [u8]) -> Result<PacketBuffer<'a>, TunError>;
+
+    /// Writes a packet to the TUN device
+    ///
+    /// # Arguments
+    /// * `buf` - Buffer to write
+    /// * `af` - Address Family of packet
+    fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error>;
+}
+
+/// Helper type to hold a raw packet and accompanying information
+pub struct PacketBuffer<'a> {
+    /// Optional packet information
+    pub af: Option<&'a [u8]>,
+
+    /// Raw packet contents
+    pub data: &'a [u8],
 }
 
 /// Configuration for a new TUN device
