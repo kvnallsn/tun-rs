@@ -1,6 +1,6 @@
 //! FreeBSD Implementation
 
-use crate::{PacketBuffer, Tun, TunConfig, TunError};
+use crate::{Tun, TunConfig, TunError};
 use std::{
     ffi::CStr,
     io::{self, Read, Write},
@@ -18,6 +18,7 @@ const SIOCSIFFLAGS: u64 = 0x8020_6910; // sys/sockio.h
 const SIOCGIFFLAGS: u64 = 0xc020_6911; // sys/sockio.h
 const SIOCIFDESTROY: u64 = 0x8020_6979; // sys/sockio.h
 const TUNSIFMODE: u64 = 0x8004_745e; // net/if_tun.h
+const TUNSIFHEAD: u64 = 0x8004_7460; // net/if_tun.h
 
 /// A generic layer-3 tunnel using the OS's networking primitives
 #[derive(Debug)]
@@ -25,13 +26,14 @@ pub struct OsTun {
     // opened file descriptor used to read/write to this device
     fd: RawFd,
 
-    // opened socket descriptor used in socket ioctls
+    // opened socket descriptor (used in socket ioctls)
     sock_fd: RawFd,
 
     // null-terminated device name string
     name: [u8; libc::IFNAMSIZ],
 
     // true if TUNSIFHEAD is set
+    //
     // TUNSIFHEAD prepends each packet with the 4-byte (32-bit)
     // address family in network byte order (aka big endian)
     packet_info: bool,
@@ -175,7 +177,7 @@ impl OsTun {
             fd,
             sock_fd,
             name,
-            packet_info: false,
+            packet_info: cfg.packet_info,
         };
 
         // 5. configure device
@@ -255,6 +257,16 @@ impl OsTun {
             }
         }
 
+        if cfg.packet_info {
+            // SAFETY:
+            if unsafe { libc::ioctl(self.fd, TUNSIFHEAD, &1) } == -1 {
+                tracing::warn!(
+                    "failed to set multi-af mode (packet_info): {}",
+                    nix::errno::Errno::last()
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -276,6 +288,8 @@ impl OsTun {
 }
 
 impl Tun for OsTun {
+    type PktInfo = (usize, u32);
+
     fn up(&self) -> Result<(), TunError> {
         let mut req = self.get_ifflags()?;
         tracing::debug!("got flags: {:x}", req.ifru_flags);
@@ -309,39 +323,43 @@ impl Tun for OsTun {
     /// # Arguments
     /// * `buf` - buffer to read data into
     ///
+    /// # Returns
+    /// * A tuple containing the total number of bytes read and (optionally)
+    /// the address family if `packet_info` is enabled
+    ///
     /// # Errors
     /// * I/O
-    fn read_packet<'a>(&self, buf: &'a mut [u8]) -> Result<PacketBuffer<'a>, TunError> {
-        if self.packet_info && buf.len() <= 4 {
-            return Err(TunError::BufferTooSmall);
-        }
+    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError> {
+        use libc::iovec;
 
-        // SAFETY: buf is guarenteed to be a valid u8 pointer and we don't exceed it's length
-        let n: isize = match unsafe { libc::read(self.fd, buf.as_mut_ptr() as _, buf.len()) } {
-            -1 => {
-                return Err(TunError::IO(io::Error::last_os_error()));
-            }
-            n if n <= 4 && self.packet_info => {
-                tracing::warn!("packet info enabled but read amt was too small");
-                return Err(TunError::NotEnoughData);
-            }
-            n => n,
+        // packet info data is the first four bytes (if enabled)
+        let mut hdr = [0u8; 4];
+
+        let iovs = [
+            iovec {
+                iov_base: hdr.as_mut_ptr() as *mut libc::c_void,
+                iov_len: hdr.len(),
+            },
+            iovec {
+                iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+                iov_len: buf.len(),
+            },
+        ];
+
+        let idx = match self.packet_info {
+            true => 0,
+            false => 1,
         };
+
+        // SAFETY: hdr and buf are guarenteed to be valid buffers
+        let n: isize =
+            unsafe { libc::readv(self.fd, &iovs[idx] as *const _, (iovs.len() - idx) as _) };
         tracing::trace!("tun read: read {} bytes", n);
 
-        let pb = if self.packet_info {
-            PacketBuffer {
-                af: Some(&buf[0..4]),
-                data: &buf[4..],
-            }
-        } else {
-            PacketBuffer {
-                af: None,
-                data: buf,
-            }
-        };
-
-        Ok(pb)
+        match n {
+            -1 => Err(TunError::IO(io::Error::last_os_error())),
+            n => Ok((n as usize, u32::from_be_bytes(hdr))),
+        }
     }
 
     /// Writes a packet to the TUN device
@@ -350,19 +368,28 @@ impl Tun for OsTun {
     /// * `buf` - Buffer to write
     /// * `af` - Address Family of packet
     fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error> {
-        if self.packet_info {
-            let pi = af.to_be_bytes();
-            // SAFETY: self.fd is guarenteed to be a valid/opened file descripter
-            //         buf is guarenteed to be a valid u8 pointer with a set length
-            if unsafe { libc::write(self.fd, pi.as_ptr() as _, pi.len() as _) } == -1 {
-                tracing::warn!("failed to write address family");
-                return Err(io::Error::last_os_error());
-            }
-        }
+        use libc::iovec;
+
+        let hdr = af.to_be_bytes();
+        let iovs = [
+            iovec {
+                iov_base: hdr.as_ptr() as _,
+                iov_len: hdr.len(),
+            },
+            iovec {
+                iov_base: buf.as_ptr() as _,
+                iov_len: buf.len(),
+            },
+        ];
+
+        let idx = match self.packet_info {
+            true => 0,
+            false => 1,
+        };
 
         // SAFETY: self.fd is guarenteed to be a valid/opened file descripter
         //         buf is guarenteed to be a valid u8 pointer with a set length
-        match unsafe { libc::write(self.fd, buf.as_ptr() as _, buf.len() as _) } {
+        match unsafe { libc::writev(self.fd, &iovs[idx] as *const _, (iovs.len() - idx) as _) } {
             -1 => Err(io::Error::last_os_error()),
             n => Ok(n as usize),
         }

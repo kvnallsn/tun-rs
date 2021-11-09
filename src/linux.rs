@@ -55,42 +55,6 @@ pub struct OsTun {
     packet_info: bool,
 }
 
-/// Platform-specific tunnel configuration parameters
-#[derive(Debug, Default)]
-pub struct OsTunConfig {
-    /// Name of this interface
-    pub(crate) name: String,
-
-    /// Set to enable the 4-byte packet info header
-    pub(crate) packet_info: bool,
-}
-
-pub trait OsConfig {
-    /// Enable packet information on this TUN device
-    ///
-    /// # Arguments
-    /// * `enabled` - true to enable packet information, false to disable
-    fn packet_information(self, enabled: bool) -> Self;
-
-    /// Sets the name of this interface
-    ///
-    /// # Arguments
-    /// * `name` - Name of the interface (max 16 characters)
-    fn name(self, name: impl Into<String>) -> Self;
-}
-
-impl OsConfig for TunConfig {
-    fn packet_information(mut self, enabled: bool) -> Self {
-        self.os.packet_info = enabled;
-        self
-    }
-
-    fn name(mut self, name: impl Into<String>) -> Self {
-        self.os.name = name.into();
-        self
-    }
-}
-
 impl Read for OsTun {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n: isize = unsafe { libc::read(self.fd, buf.as_mut_ptr() as _, buf.len()) };
@@ -262,12 +226,19 @@ impl OsTun {
     /// * not run as root user or with CAP_NET_ADMIN capability set
     /// * TUN device fails to create for other reasons
     pub fn create(cfg: TunConfig) -> Result<Self, TunError> {
+        let mut cfg = cfg;
+
+        // ensure the device name is present (required on linux)
+        let name = match cfg.name.take() {
+            Some(name) => name,
+            None => return Err(TunError::DeviceNameRequired),
+        };
+
         // sanity check length of device name and check for interior nulls
-        let name = CString::new(cfg.os.name.as_str()).map_err(|error| {
-            TunError::DeviceNameContainsNuls {
+        let name =
+            CString::new(cfg.name.as_str()).map_err(|error| TunError::DeviceNameContainsNuls {
                 pos: error.nul_position(),
-            }
-        })?;
+            })?;
 
         let name_bytes = name.as_bytes();
         if name_bytes.len() > (libc::IFNAMSIZ - 1) {
@@ -327,7 +298,7 @@ impl OsTun {
             self.assign_ip(ip, mask)?;
         }
 
-        if cfg.os.packet_info {
+        if cfg.packet_info {
             // enable packet information
             self.packet_info = true;
         }

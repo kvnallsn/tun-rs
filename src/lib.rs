@@ -9,7 +9,7 @@ use std::{
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use self::linux::{OsConfig, OsTun, OsTunConfig};
+pub use self::linux::OsTun;
 
 #[cfg(target_os = "freebsd")]
 mod freebsd;
@@ -40,6 +40,9 @@ impl TunDevice {
 pub enum TunError {
     #[error("string must have exactly one null byte at the end. No more, no less")]
     InvalidCString,
+
+    #[error("device name was not provided but is required")]
+    DeviceNameRequired,
 
     #[error("device name has null bytes at position {pos}")]
     DeviceNameContainsNuls { pos: usize },
@@ -104,13 +107,16 @@ pub trait Tun: Read + Write + Sized {
 }
 
 /// Configuration for a new TUN device
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TunConfig {
     /// IP address and subnet mask to assign TUN device
     pub(crate) ip: Option<(IpAddr, u8)>,
 
-    /// OS-specific configuration parameters
-    pub(crate) os: OsTunConfig,
+    /// Name to assign to this TUN interface
+    pub(crate) name: Option<String>,
+
+    /// Enables (or disables) additional packet info on read
+    pub(crate) packet_info: bool,
 }
 
 impl TunConfig {
@@ -125,6 +131,35 @@ impl TunConfig {
     /// * `cidr` - Classless Inter-Domain Routing mask
     pub fn ip(mut self, ip: impl Into<IpAddr>, cidr: u8) -> Self {
         self.ip = Some((ip.into(), cidr));
+        self
+    }
+
+    /// Sets the name of this interface
+    ///
+    /// # Supported OSes:
+    /// * Linux
+    ///
+    /// # Arguments
+    /// * `name` - Unique name to assign to this interface
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Enables (or disables) additional packet information
+    ///
+    /// Some operating systems support returning additional information about
+    /// the IP packet that was just read in and prepend it before the rest of
+    /// the data.
+    ///
+    /// # Supported OSes:
+    /// * Linux
+    /// * FreeBSD
+    ///
+    /// # Arguments
+    /// * `enabled` - True to enabled packet info, false to disable
+    pub fn packet_info(mut self, enabled: bool) -> Self {
+        self.packet_info = enabled;
         self
     }
 }

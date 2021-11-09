@@ -4,12 +4,9 @@ use pnet::packet::{
     udp::{MutableUdpPacket, UdpPacket},
     MutablePacket, Packet,
 };
-use std::{
-    io::{Read, Write},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use tun_rs::{OsTun, Tun, TunConfig};
 
@@ -53,8 +50,11 @@ fn main() {
     })
     .expect("failed to set ctrl-c handler");
 
-    let mut tun = OsTun::create(TunConfig::default().ip([192, 168, 70, 100], 24))
-        .expect("failed to build tun device");
+    let cfg = TunConfig::default()
+        .ip([192, 168, 70, 100], 24)
+        .packet_info(true);
+
+    let tun = OsTun::create(cfg).expect("failed to build tun device");
 
     tun.up().expect("failed to set tun as up");
 
@@ -62,7 +62,12 @@ fn main() {
 
     while !stop.load(Ordering::Relaxed) {
         let mut buf = [0u8; 1500];
-        tun.read(&mut buf).expect("failed to read from device");
+        let (_, af) = tun
+            .read_packet(&mut buf)
+            .expect("failed to read from device");
+
+        tracing::info!(%af, "got packet");
+
         let ip_version = buf[0] >> 4;
         let size = u16::from_be_bytes([buf[2], buf[3]]) as usize;
         match ip_version {
@@ -72,7 +77,8 @@ fn main() {
                         IpNextHeaderProtocols::Udp => {
                             if let Some(udp) = UdpPacket::new(ip.payload()) {
                                 let pkt = handle_packet(&ip, &udp);
-                                tun.write_all(pkt.packet()).expect("failed to write packet");
+                                tun.write_packet(pkt.packet(), af)
+                                    .expect("failed to write packet");
                             }
                         }
                         _ => { /* ignore other protocols */ }
