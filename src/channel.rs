@@ -1,6 +1,6 @@
 //! A channel-based device that can be used for testing
 
-use crate::{PacketBuffer, Tun, TunConfig, TunError};
+use crate::{Tun, TunConfig, TunError};
 use crossbeam_channel::{Receiver, Sender};
 use std::{
     cmp,
@@ -43,7 +43,7 @@ impl Read for ChannelTun {
             to_copy
         };
 
-        if data.len() > 0 {
+        if !data.is_empty() {
             // buffer any remaining items
             self.rx_buffer.append(&mut data);
         }
@@ -66,6 +66,10 @@ impl Write for ChannelTun {
 }
 
 impl Tun for ChannelTun {
+    type Reader = ();
+    type Writer = ();
+    type PktInfo = ();
+
     fn up(&self) -> Result<(), TunError> {
         // nothing to do
         Ok(())
@@ -76,9 +80,13 @@ impl Tun for ChannelTun {
         Ok(())
     }
 
-    fn read_packet<'a>(&self, _buf: &'a mut [u8]) -> Result<PacketBuffer<'a>, TunError> {
+    fn split(&self) -> (Self::Reader, Self::Writer) {
+        ((), ())
+    }
+
+    fn read_packet(&self, _buf: &mut [u8]) -> Result<Self::PktInfo, TunError> {
         // TODO implement this
-        todo!()
+        Ok(())
     }
 
     fn write_packet(&self, _buf: &[u8], _af: u32) -> Result<usize, io::Error> {

@@ -50,11 +50,18 @@ pub struct OsTun {
 
     // index of inteface
     index: i32,
+
+    // set to true if packet info has been requested
+    packet_info: bool,
 }
 
 /// Platform-specific tunnel configuration parameters
 #[derive(Debug, Default)]
 pub struct OsTunConfig {
+    /// Name of this interface
+    pub(crate) name: String,
+
+    /// Set to enable the 4-byte packet info header
     pub(crate) packet_info: bool,
 }
 
@@ -64,11 +71,22 @@ pub trait OsConfig {
     /// # Arguments
     /// * `enabled` - true to enable packet information, false to disable
     fn packet_information(self, enabled: bool) -> Self;
+
+    /// Sets the name of this interface
+    ///
+    /// # Arguments
+    /// * `name` - Name of the interface (max 16 characters)
+    fn name(self, name: impl Into<String>) -> Self;
 }
 
 impl OsConfig for TunConfig {
     fn packet_information(mut self, enabled: bool) -> Self {
         self.os.packet_info = enabled;
+        self
+    }
+
+    fn name(mut self, name: impl Into<String>) -> Self {
+        self.os.name = name.into();
         self
     }
 }
@@ -100,6 +118,9 @@ impl Write for OsTun {
 }
 
 impl Tun for OsTun {
+    // (number of bytes read, address family (if packet info))
+    type PktInfo = (usize, Option<u32>);
+
     fn up(&self) -> Result<(), TunError> {
         // mark device as up
         let mut socket = self.open_netlink_socket(&[])?;
@@ -152,6 +173,65 @@ impl Tun for OsTun {
         socket.send(hdr)?;
         Ok(())
     }
+
+    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError> {
+        use libc::iovec;
+        let mut hdr = [0u8; 4];
+
+        let mut iov = [
+            iovec {
+                iov_base: hdr.as_mut_ptr() as _,
+                iov_len: hdr.len(),
+            },
+            iovec {
+                iov_base: buf.as_mut_ptr() as _,
+                iov_len: buf.len(),
+            },
+        ];
+
+        let idx = match self.packet_info {
+            true => 0,
+            false => 1,
+        };
+
+        tracing::debug!(%self.packet_info, "reading packet from tun");
+        match unsafe { libc::readv(self.fd, &mut iov[idx] as *mut _, (iov.len() - idx) as _) } {
+            -1 => Err(TunError::IO(io::Error::last_os_error())),
+            n => {
+                tracing::debug!("tun read {} bytes", n);
+                match self.packet_info {
+                    true => Ok((n as usize, Some(u32::from_be_bytes(hdr)))),
+                    false => Ok((n as usize, None)),
+                }
+            }
+        }
+    }
+
+    fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error> {
+        use libc::iovec;
+        let hdr = af.to_be_bytes();
+
+        let mut iov = [
+            iovec {
+                iov_base: hdr.as_ptr() as _,
+                iov_len: hdr.len(),
+            },
+            iovec {
+                iov_base: buf.as_ptr() as _,
+                iov_len: buf.len(),
+            },
+        ];
+
+        let idx = match self.packet_info {
+            true => 0,
+            false => 1,
+        };
+
+        match unsafe { libc::writev(self.fd, &mut iov[idx] as *mut _, (iov.len() - idx) as _) } {
+            -1 => Err(io::Error::last_os_error()),
+            n => Ok(n as usize),
+        }
+    }
 }
 
 impl OsTun {
@@ -181,10 +261,12 @@ impl OsTun {
     /// * `name` is too long (longer than `libc::IFNAMSIZ`)
     /// * not run as root user or with CAP_NET_ADMIN capability set
     /// * TUN device fails to create for other reasons
-    pub fn create(name: &str, cfg: TunConfig) -> Result<Self, TunError> {
+    pub fn create(cfg: TunConfig) -> Result<Self, TunError> {
         // sanity check length of device name and check for interior nulls
-        let name = CString::new(name).map_err(|error| TunError::DeviceNameContainsNuls {
-            pos: error.nul_position(),
+        let name = CString::new(cfg.os.name.as_str()).map_err(|error| {
+            TunError::DeviceNameContainsNuls {
+                pos: error.nul_position(),
+            }
         })?;
 
         let name_bytes = name.as_bytes();
@@ -226,7 +308,12 @@ impl OsTun {
             idx => idx as i32,
         };
 
-        let mut tun = Self { fd, name, index };
+        let mut tun = Self {
+            fd,
+            name,
+            index,
+            packet_info: false,
+        };
         tun.configure(cfg)?;
         Ok(tun)
     }
@@ -242,6 +329,7 @@ impl OsTun {
 
         if cfg.os.packet_info {
             // enable packet information
+            self.packet_info = true;
         }
 
         Ok(())
@@ -329,14 +417,18 @@ mod tests {
     #[test]
     #[cfg_attr(not(feature = "root-tests"), ignore)]
     fn root_create_tun_device() {
-        let _dev = OsTun::create("linux0", TunConfig::default())
+        let _dev = OsTun::create(TunConfig::default().name("linux0"))
             .expect("failed to create linux tun device");
     }
 
     #[test]
     #[cfg_attr(not(feature = "root-tests"), ignore)]
     fn root_create_tun_device_with_ip() {
-        let _dev = OsTun::create("linux1", TunConfig::default().ip([192, 168, 70, 100], 24))
-            .expect("failed to create linux tun device");
+        let _dev = OsTun::create(
+            TunConfig::default()
+                .name("linux1")
+                .ip([192, 168, 70, 100], 24),
+        )
+        .expect("failed to create linux tun device");
     }
 }

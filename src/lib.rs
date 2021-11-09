@@ -3,20 +3,38 @@
 use std::{
     io::{self, Read, Write},
     net::IpAddr,
+    sync::Arc,
 };
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use self::linux::{OsTun, OsTunConfig};
+pub use self::linux::{OsConfig, OsTun, OsTunConfig};
 
 #[cfg(target_os = "freebsd")]
 mod freebsd;
 #[cfg(target_os = "freebsd")]
 pub use self::freebsd::OsTun;
 
-#[cfg(feature = "channel")]
-mod channel;
+//#[cfg(feature = "channel")]
+//mod channel;
+
+#[derive(Clone, Debug)]
+pub struct TunDevice(Arc<OsTun>);
+
+impl std::ops::Deref for TunDevice {
+    type Target = OsTun;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TunDevice {
+    pub fn create(cfg: TunConfig) -> Result<Self, TunError> {
+        Ok(Self(Arc::new(OsTun::create(cfg)?)))
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TunError {
@@ -58,6 +76,8 @@ pub enum TunError {
 }
 
 pub trait Tun: Read + Write + Sized {
+    type PktInfo;
+
     /// Marks the device as up on the system
     fn up(&self) -> Result<(), TunError>;
 
@@ -73,7 +93,7 @@ pub trait Tun: Read + Write + Sized {
     ///
     /// # Errors
     /// * I/O
-    fn read_packet<'a>(&self, buf: &'a mut [u8]) -> Result<PacketBuffer<'a>, TunError>;
+    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError>;
 
     /// Writes a packet to the TUN device
     ///
@@ -81,15 +101,6 @@ pub trait Tun: Read + Write + Sized {
     /// * `buf` - Buffer to write
     /// * `af` - Address Family of packet
     fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error>;
-}
-
-/// Helper type to hold a raw packet and accompanying information
-pub struct PacketBuffer<'a> {
-    /// Optional packet information
-    pub af: Option<&'a [u8]>,
-
-    /// Raw packet contents
-    pub data: &'a [u8],
 }
 
 /// Configuration for a new TUN device
