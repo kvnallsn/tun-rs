@@ -51,8 +51,11 @@ fn main() {
     .expect("failed to set ctrl-c handler");
 
     let cfg = TunConfig::default()
-        .ip([192, 168, 70, 100], 24)
+        .ip([192, 168, 80, 100], 24)
         .packet_info(true);
+
+    #[cfg(target_os = "linux")]
+    let cfg = cfg.name("echo0");
 
     let tun = OsTun::create(cfg).expect("failed to build tun device");
 
@@ -62,11 +65,11 @@ fn main() {
 
     while !stop.load(Ordering::Relaxed) {
         let mut buf = [0u8; 1500];
-        let (_, af) = tun
+        let (_, pi) = tun
             .read_packet(&mut buf)
             .expect("failed to read from device");
 
-        tracing::info!(%af, "got packet");
+        tracing::info!(?pi, "got packet");
 
         let ip_version = buf[0] >> 4;
         let size = u16::from_be_bytes([buf[2], buf[3]]) as usize;
@@ -77,7 +80,7 @@ fn main() {
                         IpNextHeaderProtocols::Udp => {
                             if let Some(udp) = UdpPacket::new(ip.payload()) {
                                 let pkt = handle_packet(&ip, &udp);
-                                tun.write_packet(pkt.packet(), af)
+                                tun.write_packet(pkt.packet(), pi)
                                     .expect("failed to write packet");
                             }
                         }

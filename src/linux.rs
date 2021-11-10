@@ -83,7 +83,7 @@ impl Write for OsTun {
 
 impl Tun for OsTun {
     // (number of bytes read, address family (if packet info))
-    type PktInfo = (usize, Option<u32>);
+    type PktInfo = (u16, u16);
 
     fn up(&self) -> Result<(), TunError> {
         // mark device as up
@@ -138,7 +138,7 @@ impl Tun for OsTun {
         Ok(())
     }
 
-    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError> {
+    fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, Self::PktInfo), TunError> {
         use libc::iovec;
         let mut hdr = [0u8; 4];
 
@@ -159,26 +159,36 @@ impl Tun for OsTun {
         };
 
         tracing::debug!(%self.packet_info, "reading packet from tun");
-        match unsafe { libc::readv(self.fd, &mut iov[idx] as *mut _, (iov.len() - idx) as _) } {
+        let res = unsafe { libc::readv(self.fd, &mut iov[idx] as *mut _, (iov.len() - idx) as _) };
+        tracing::debug!("tun read {} bytes", res);
+        match res {
             -1 => Err(TunError::IO(io::Error::last_os_error())),
-            n => {
-                tracing::debug!("tun read {} bytes", n);
-                match self.packet_info {
-                    true => Ok((n as usize, Some(u32::from_be_bytes(hdr)))),
-                    false => Ok((n as usize, None)),
+            n => match self.packet_info {
+                true => {
+                    let flags = u16::from_le_bytes([hdr[0], hdr[1]]);
+                    let af = u16::from_be_bytes([hdr[2], hdr[3]]);
+                    let sz = (n - 4) as usize;
+                    Ok((sz, (flags, af)))
                 }
-            }
+                false => Ok((n as usize, (0, 0))),
+            },
         }
     }
 
-    fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error> {
+    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error> {
         use libc::iovec;
-        let hdr = af.to_be_bytes();
+        let (flags, af) = pi;
+        let flags = flags.to_le_bytes();
+        let af = af.to_be_bytes();
 
         let mut iov = [
             iovec {
-                iov_base: hdr.as_ptr() as _,
-                iov_len: hdr.len(),
+                iov_base: flags.as_ptr() as _,
+                iov_len: flags.len(),
+            },
+            iovec {
+                iov_base: af.as_ptr() as _,
+                iov_len: af.len(),
             },
             iovec {
                 iov_base: buf.as_ptr() as _,
@@ -188,7 +198,7 @@ impl Tun for OsTun {
 
         let idx = match self.packet_info {
             true => 0,
-            false => 1,
+            false => 2,
         };
 
         match unsafe { libc::writev(self.fd, &mut iov[idx] as *mut _, (iov.len() - idx) as _) } {
@@ -236,7 +246,7 @@ impl OsTun {
 
         // sanity check length of device name and check for interior nulls
         let name =
-            CString::new(cfg.name.as_str()).map_err(|error| TunError::DeviceNameContainsNuls {
+            CString::new(name.as_str()).map_err(|error| TunError::DeviceNameContainsNuls {
                 pos: error.nul_position(),
             })?;
 
@@ -255,10 +265,15 @@ impl OsTun {
             fd => fd,
         };
 
+        let mut flags = libc::IFF_TUN;
+        if !cfg.packet_info {
+            flags |= libc::IFF_NO_PI;
+        }
+
         // construct request struct
         let mut req = IfReq {
             name: [0u8; libc::IFNAMSIZ],
-            flags: (libc::IFF_TUN | libc::IFF_NO_PI) as c_short,
+            flags: flags as c_short,
             _pad: [0u8; 64],
         };
 

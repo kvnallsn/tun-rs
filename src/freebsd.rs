@@ -288,7 +288,7 @@ impl OsTun {
 }
 
 impl Tun for OsTun {
-    type PktInfo = (usize, u32);
+    type PktInfo = u32;
 
     fn up(&self) -> Result<(), TunError> {
         let mut req = self.get_ifflags()?;
@@ -329,7 +329,7 @@ impl Tun for OsTun {
     ///
     /// # Errors
     /// * I/O
-    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError> {
+    fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, Self::PktInfo), TunError> {
         use libc::iovec;
 
         // packet info data is the first four bytes (if enabled)
@@ -366,11 +366,11 @@ impl Tun for OsTun {
     ///
     /// # Arguments
     /// * `buf` - Buffer to write
-    /// * `af` - Address Family of packet
-    fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error> {
+    /// * `pi` - Packet information (address family of packet)
+    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error> {
         use libc::iovec;
 
-        let hdr = af.to_be_bytes();
+        let hdr = pi.to_be_bytes();
         let iovs = [
             iovec {
                 iov_base: hdr.as_ptr() as _,

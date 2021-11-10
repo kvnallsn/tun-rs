@@ -94,16 +94,21 @@ pub trait Tun: Read + Write + Sized {
     /// # Arguments
     /// * `buf` - buffer to read data into
     ///
+    /// # Returns
+    /// `(bytes read, packet_info)`
+    /// A tuple containing the number of bytes read into `buf` and any
+    /// packet information (if enabled)
+    ///
     /// # Errors
     /// * I/O
-    fn read_packet(&self, buf: &mut [u8]) -> Result<Self::PktInfo, TunError>;
+    fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, Self::PktInfo), TunError>;
 
     /// Writes a packet to the TUN device
     ///
     /// # Arguments
     /// * `buf` - Buffer to write
     /// * `af` - Address Family of packet
-    fn write_packet(&self, buf: &[u8], af: u32) -> Result<usize, io::Error>;
+    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error>;
 }
 
 /// Configuration for a new TUN device
