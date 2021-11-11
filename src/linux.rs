@@ -206,6 +206,10 @@ impl Tun for OsTun {
             n => Ok(n as usize),
         }
     }
+
+    fn blank_pktinfo(&self) -> Self::PktInfo {
+        (0, 0)
+    }
 }
 
 impl OsTun {
@@ -298,7 +302,7 @@ impl OsTun {
             fd,
             name,
             index,
-            packet_info: false,
+            packet_info: cfg.packet_info,
         };
         tun.configure(cfg)?;
         Ok(tun)
@@ -311,11 +315,6 @@ impl OsTun {
     pub fn configure(&mut self, cfg: TunConfig) -> Result<(), TunError> {
         if let Some((ip, mask)) = cfg.ip {
             self.assign_ip(ip, mask)?;
-        }
-
-        if cfg.packet_info {
-            // enable packet information
-            self.packet_info = true;
         }
 
         Ok(())

@@ -394,6 +394,10 @@ impl Tun for OsTun {
             n => Ok(n as usize),
         }
     }
+
+    fn blank_pktinfo(&self) -> Self::PktInfo {
+        0
+    }
 }
 
 impl Drop for OsTun {

@@ -78,7 +78,7 @@ pub enum TunError {
     Generic(Box<dyn std::error::Error>),
 }
 
-pub trait Tun: Read + Write + Sized {
+pub trait Tun: Sized {
     type PktInfo;
 
     /// Marks the device as up on the system
@@ -109,6 +109,39 @@ pub trait Tun: Read + Write + Sized {
     /// * `buf` - Buffer to write
     /// * `af` - Address Family of packet
     fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error>;
+
+    /// Returns a blank/empty packet info struct
+    ///
+    /// Useful for methods where you have to call `write_packet` but packet info hasn't been
+    /// provided
+    fn blank_pktinfo(&self) -> Self::PktInfo;
+}
+
+impl<T> Tun for Arc<T>
+where
+    T: Tun,
+{
+    type PktInfo = T::PktInfo;
+
+    fn up(&self) -> Result<(), TunError> {
+        self.as_ref().up()
+    }
+
+    fn down(&self) -> Result<(), TunError> {
+        self.as_ref().down()
+    }
+
+    fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, Self::PktInfo), TunError> {
+        self.as_ref().read_packet(buf)
+    }
+
+    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error> {
+        self.as_ref().write_packet(buf, pi)
+    }
+
+    fn blank_pktinfo(&self) -> Self::PktInfo {
+        self.as_ref().blank_pktinfo()
+    }
 }
 
 /// Configuration for a new TUN device
