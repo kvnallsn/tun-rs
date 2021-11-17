@@ -75,7 +75,7 @@ pub enum TunError {
     IO(#[from] io::Error),
 
     #[error("tunnel error: {0}")]
-    Generic(Box<dyn std::error::Error>),
+    Generic(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 pub trait Tun: Sized {
@@ -108,13 +108,7 @@ pub trait Tun: Sized {
     /// # Arguments
     /// * `buf` - Buffer to write
     /// * `af` - Address Family of packet
-    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error>;
-
-    /// Returns a blank/empty packet info struct
-    ///
-    /// Useful for methods where you have to call `write_packet` but packet info hasn't been
-    /// provided
-    fn blank_pktinfo(&self) -> Self::PktInfo;
+    fn write_packet(&self, buf: &[u8], pi: Option<Self::PktInfo>) -> Result<usize, io::Error>;
 }
 
 impl<T> Tun for Arc<T>
@@ -135,12 +129,8 @@ where
         self.as_ref().read_packet(buf)
     }
 
-    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error> {
+    fn write_packet(&self, buf: &[u8], pi: Option<Self::PktInfo>) -> Result<usize, io::Error> {
         self.as_ref().write_packet(buf, pi)
-    }
-
-    fn blank_pktinfo(&self) -> Self::PktInfo {
-        self.as_ref().blank_pktinfo()
     }
 }
 

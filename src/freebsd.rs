@@ -367,10 +367,14 @@ impl Tun for OsTun {
     /// # Arguments
     /// * `buf` - Buffer to write
     /// * `pi` - Packet information (address family of packet)
-    fn write_packet(&self, buf: &[u8], pi: Self::PktInfo) -> Result<usize, io::Error> {
+    fn write_packet(&self, buf: &[u8], pi: Option<Self::PktInfo>) -> Result<usize, io::Error> {
         use libc::iovec;
 
-        let hdr = pi.to_be_bytes();
+        let hdr = match pi {
+            Some(af) => af.to_be_bytes(),
+            None => [0u8; 4],
+        };
+
         let iovs = [
             iovec {
                 iov_base: hdr.as_ptr() as _,
@@ -393,10 +397,6 @@ impl Tun for OsTun {
             -1 => Err(io::Error::last_os_error()),
             n => Ok(n as usize),
         }
-    }
-
-    fn blank_pktinfo(&self) -> Self::PktInfo {
-        0
     }
 }
 
